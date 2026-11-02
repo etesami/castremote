@@ -1,0 +1,7 @@
+{
+  "media_dir": "~/Videos",
+  "port": 8765,
+  "cast_hosts": [],
+  "public_host": "",
+  "log_requests": false
+}

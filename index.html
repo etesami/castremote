@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111418">
+<title>Cast Remote</title>
+<style>
+  :root { --bg:#111418; --card:#1b2027; --line:#2a313b; --text:#e8ecf1; --dim:#8b95a3; --acc:#4f9cf9; --bad:#f26d6d; --warn:#e8b14f; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:560px; margin:0 auto; padding:16px 16px 40px; }
+  h1 { font-size:20px; margin:4px 0 16px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:14px; }
+  label { display:block; font-size:13px; color:var(--dim); margin:10px 0 6px; }
+  label:first-child { margin-top:0; }
+  textarea, select, input[type=file] { width:100%; background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:10px; padding:10px; font:inherit; }
+  textarea { resize:vertical; min-height:64px; word-break:break-all; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .row > * { flex:1; }
+  button { background:#262d37; color:var(--text); border:1px solid var(--line); border-radius:10px; padding:12px 8px; font:inherit; font-weight:600; cursor:pointer; touch-action:manipulation; }
+  button:active { transform:scale(.97); }
+  button.primary { background:var(--acc); border-color:var(--acc); color:#fff; }
+  button.big { font-size:22px; padding:14px 8px; }
+  button.danger { color:var(--bad); width:100%; margin-top:8px; }
+  button:disabled { opacity:.5; }
+  .small { flex:0 0 auto; padding:10px 14px; }
+  .msg { font-size:14px; margin-top:10px; min-height:1em; white-space:pre-wrap; }
+  .msg.bad { color:var(--bad); } .msg.warn { color:var(--warn); }
+  .now { font-size:14px; color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  input[type=range] { width:100%; accent-color:var(--acc); margin:12px 0 4px; }
+  .times { display:flex; justify-content:space-between; font-size:13px; color:var(--dim); font-variant-numeric:tabular-nums; }
+  .grid { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-top:10px; }
+  .grid .wide { grid-column:span 2; }
+  .tag { font-size:13px; color:var(--dim); text-align:center; font-variant-numeric:tabular-nums; }
+  .hidden { display:none !important; }
+  .crumb { font-size:14px; color:var(--dim); margin-bottom:8px; overflow-wrap:anywhere; }
+  .list { max-height:320px; overflow-y:auto; border:1px solid var(--line); border-radius:10px; }
+  .item { display:flex; justify-content:space-between; gap:10px; width:100%; background:none; border:0; border-bottom:1px solid var(--line); border-radius:0; padding:12px 10px; font-weight:400; text-align:start; }
+  .item:last-child { border-bottom:0; }
+  .item:active { transform:none; background:#262d37; }
+  .item.on { background:#1d3350; }
+  .item .name { overflow-wrap:anywhere; min-width:0; }
+  .item .size { flex:0 0 auto; color:var(--dim); font-size:13px; font-variant-numeric:tabular-nums; }
+</style>
+</head>
+<body>
+<main>
+  <h1>📺 Cast Remote</h1>
+
+  <section id="library" class="hidden">
+    <div class="crumb" id="crumb" dir="auto"></div>
+    <div class="list" id="list"></div>
+  </section>
+
+  <section>
+    <label for="url">Video link</label>
+    <textarea id="url" placeholder="http://192.168.1.50:8000/Movies/film.mkv" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
+
+    <label for="device">Chromecast</label>
+    <div class="row">
+      <select id="device"><option value="">Searching…</option></select>
+      <button class="small" id="searchBtn">Search</button>
+    </div>
+
+    <label for="sub">Subtitles</label>
+    <div class="row">
+      <select id="sub"><option value="none">None</option></select>
+      <button class="small" id="findBtn">Find</button>
+    </div>
+    <input type="file" id="file" accept=".srt,.vtt,.ass,.ssa,.sub,text/*" class="hidden" style="margin-top:8px">
+
+    <div class="row" style="margin-top:8px">
+      <select id="encoding" title="Subtitle text encoding">
+        <option value="auto">Encoding: auto-detect</option>
+        <option value="utf-8">UTF-8</option>
+        <option value="cp1256">Windows-1256 (Persian/Arabic)</option>
+        <option value="utf-16">UTF-16</option>
+        <option value="iso-8859-6">ISO-8859-6 (Arabic)</option>
+        <option value="cp1252">Windows-1252 (Western)</option>
+      </select>
+      <select id="lang" title="Subtitle language">
+        <option value="fa">Persian</option><option value="en">English</option><option value="ar">Arabic</option>
+      </select>
+    </div>
+
+    <button class="primary" id="castBtn" style="width:100%;margin-top:14px">▶ Cast</button>
+    <button id="applyBtn" class="hidden" style="width:100%;margin-top:8px">Change subtitles, keep position</button>
+    <div class="msg" id="msg"></div>
+  </section>
+
+  <section id="player">
+    <div class="now" id="now">Nothing playing</div>
+    <input type="range" id="seek" min="0" max="0" step="1" value="0">
+    <div class="times"><span id="cur">0:00</span><span id="state"></span><span id="dur">0:00</span></div>
+
+    <div class="grid">
+      <button data-act="seek_rel" data-v="-30">−30s</button>
+      <button data-act="seek_rel" data-v="-10">−10s</button>
+      <button data-act="seek_rel" data-v="10">+10s</button>
+      <button data-act="seek_rel" data-v="30">+30s</button>
+      <button class="big wide" id="playBtn" data-act="toggle">⏯</button>
+      <button data-act="seek_rel" data-v="-300">−5m</button>
+      <button data-act="seek_rel" data-v="300">+5m</button>
+      <button data-act="volume" data-v="-0.05">🔉</button>
+      <button data-act="volume" data-v="0.05">🔊</button>
+      <button data-act="sub_toggle" id="ccBtn">CC</button>
+      <button data-act="stop">■ Stop</button>
+    </div>
+    <button class="danger" data-act="disconnect">⏏ Disconnect</button>
+
+    <label style="margin-top:14px">Subtitle timing <span id="offset" class="tag"></span></label>
+    <div class="grid" style="margin-top:0">
+      <button data-act="sub_delay" data-v="-1">−1s</button>
+      <button data-act="sub_delay" data-v="-0.25">−¼s</button>
+      <button data-act="sub_delay" data-v="0.25">+¼s</button>
+      <button data-act="sub_delay" data-v="1">+1s</button>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let probe = null, seeking = false, probeToken = 0;
+const LANGS = { per: "Persian", fas: "Persian", fa: "Persian", eng: "English", en: "English", ara: "Arabic", ar: "Arabic" };
+const LANG_CODE = { per: "fa", fas: "fa", fa: "fa", eng: "en", en: "en", ara: "ar", ar: "ar" };
+
+function say(text, cls = "") { const m = $("msg"); m.textContent = text; m.className = "msg " + cls; }
+function fmt(t) {
+  t = Math.max(0, Math.floor(t || 0));
+  const h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), s = t % 60;
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s).padStart(2, "0");
+}
+async function api(path, opts = {}) {
+  const r = await fetch(path, opts);
+  const j = await r.json().catch(() => ({ error: "Bad response from server" }));
+  if (!r.ok || j.error) throw new Error(j.error || r.statusText);
+  return j;
+}
+const post = (path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+// remember last link / device
+try { $("url").value = localStorage.getItem("url") || ""; } catch {}
+
+async function loadDevices(refresh) {
+  $("searchBtn").disabled = true;
+  try {
+    const devs = await api("/api/devices" + (refresh ? "?refresh=1" : ""));
+    const sel = $("device"), saved = (() => { try { return localStorage.getItem("device"); } catch {} })();
+    sel.innerHTML = devs.length ? "" : '<option value="">No Chromecast found — tap Search</option>';
+    for (const d of devs) sel.add(new Option(`${d.name} (${d.model})`, d.id));
+    if (saved && devs.some(d => d.id === saved)) sel.value = saved;
+  } catch (e) { say(e.message, "bad"); }
+  $("searchBtn").disabled = false;
+}
+
+function fmtSize(b) {
+  return b >= 1e9 ? (b / 1e9).toFixed(1) + " GB" : Math.round(b / 1e6) + " MB";
+}
+function listItem(name, right, onClick) {
+  const b = document.createElement("button");
+  b.className = "item";
+  const n = document.createElement("span");
+  n.className = "name"; n.dir = "auto"; n.textContent = name;
+  const s = document.createElement("span");
+  s.className = "size"; s.textContent = right;
+  b.append(n, s);
+  b.onclick = onClick;
+  return b;
+}
+async function browse(path) {
+  try {
+    const d = await api("/api/browse?path=" + encodeURIComponent(path));
+    if (!d.enabled) return;
+    $("library").classList.remove("hidden");
+    try { localStorage.setItem("dir", d.path); } catch {}
+    $("crumb").textContent = "📁 " + [d.root, ...(d.path ? d.path.split("/") : [])].join(" / ");
+    const list = $("list");
+    list.innerHTML = "";
+    if (d.path) list.append(listItem("⬆ Up", "", () => browse(d.path.split("/").slice(0, -1).join("/"))));
+    d.dirs.forEach(x => list.append(listItem("📁 " + x.name, "", () => browse(x.path))));
+    d.files.forEach(x => {
+      const it = listItem("🎬 " + x.name, fmtSize(x.size), () => {
+        list.querySelectorAll(".on").forEach(e => e.classList.remove("on"));
+        it.classList.add("on");
+        $("url").value = x.url;
+        findSubs();
+      });
+      if (x.url === $("url").value.trim()) it.classList.add("on");
+      list.append(it);
+    });
+    if (!d.dirs.length && !d.files.length) {
+      const e = document.createElement("div");
+      e.className = "tag"; e.style.padding = "16px"; e.textContent = "No videos in this folder";
+      list.append(e);
+    }
+    list.scrollTop = 0;
+  } catch (e) {
+    if (path) return browse("");   // remembered folder is gone: fall back to the top
+    $("library").classList.remove("hidden");
+    $("crumb").textContent = e.message;
+  }
+}
+
+async function findSubs() {
+  const url = $("url").value.trim();
+  if (!url) return say("Paste a video link first.", "warn");
+  const token = ++probeToken;
+  probe = null;
+  $("sub").innerHTML = '<option value="none">None</option>';
+  $("file").classList.add("hidden");
+  try { localStorage.setItem("url", url); } catch {}
+  say("Inspecting video…");
+  $("findBtn").disabled = true;
+  try {
+    const found = await post("/api/probe", { url });
+    if (token !== probeToken) return;   // a newer pick replaced this one
+    probe = found;
+    const sel = $("sub");
+    sel.innerHTML = "";
+    sel.add(new Option("None", "none"));
+    probe.sidecars.forEach((s, i) => sel.add(new Option("📄 " + s.name, "sidecar:" + i)));
+    probe.embedded.forEach((s, i) => {
+      const label = [LANGS[s.lang] || s.lang, s.title].filter(Boolean).join(" · ") || "Track " + s.index;
+      const o = new Option(`🎞 Embedded: ${label} [${s.codec}]${s.text ? "" : " (image – unsupported)"}`, "embedded:" + i);
+      o.disabled = !s.text; sel.add(o);
+    });
+    sel.add(new Option("⬆ Upload from phone…", "upload"));
+    const usable = [...sel.options].filter(o => o.value !== "none" && o.value !== "upload" && !o.disabled);
+    const persian = usable.find(o => o.value.startsWith("embedded:") && LANG_CODE[probe.embedded[o.value.split(":")[1]].lang] === "fa");
+    const first = usable.find(o => o.value.startsWith("sidecar:")) || persian || usable[0];
+    if (first) sel.value = first.value;
+    sel.dispatchEvent(new Event("change"));
+    const n = probe.sidecars.length + probe.embedded.filter(s => s.text).length;
+    say((n ? `Found ${n} subtitle option(s).` : "No subtitles found next to the video.") +
+        (probe.warnings.length ? "\n⚠ " + probe.warnings.join("\n⚠ ") : ""), probe.warnings.length ? "warn" : "");
+  } catch (e) { if (token === probeToken) say(e.message, "bad"); }
+  if (token === probeToken) $("findBtn").disabled = false;
+}
+
+$("sub").addEventListener("change", () => {
+  $("file").classList.toggle("hidden", $("sub").value !== "upload");
+  const [kind, i] = $("sub").value.split(":");
+  const code = kind === "embedded" && probe ? LANG_CODE[probe.embedded[i].lang] : null;
+  if (code) $("lang").value = code;
+});
+$("findBtn").onclick = findSubs;
+$("searchBtn").onclick = () => loadDevices(true);
+$("url").addEventListener("change", findSubs);
+
+async function startCast(resume) {
+  const url = $("url").value.trim();
+  if (!url) return say("Paste a video link first.", "warn");
+  try { localStorage.setItem("url", url); localStorage.setItem("device", $("device").value); } catch {}
+  const fd = new FormData();
+  fd.append("url", url);
+  fd.append("device", $("device").value);
+  fd.append("encoding", $("encoding").value);
+  fd.append("lang", $("lang").value);
+  const [kind, i] = $("sub").value.split(":");
+  fd.append("sub_kind", kind);
+  if (resume) fd.append("resume", "1");
+  if (kind === "sidecar") fd.append("sub_ref", probe.sidecars[i].url);
+  if (kind === "embedded") {
+    fd.append("sub_ref", probe.embedded[i].index);
+    fd.append("codec", probe.embedded[i].codec);
+  }
+  if (kind === "upload") {
+    if (!$("file").files[0]) return say("Choose a subtitle file.", "warn");
+    fd.append("file", $("file").files[0]);
+  }
+  $("castBtn").disabled = $("applyBtn").disabled = true;
+  say(kind === "embedded" ? "Extracting subtitles…" : "Starting…");
+  try {
+    const r = await api("/api/play", { method: "POST", body: fd });
+    say(r.subtitle_lines ? `Playing with ${r.subtitle_lines} subtitle lines.` : "Playing.");
+  } catch (e) { say(e.message, "bad"); }
+  $("castBtn").disabled = $("applyBtn").disabled = false;
+}
+$("castBtn").onclick = () => startCast(false);
+$("applyBtn").onclick = () => startCast(true);
+
+document.querySelectorAll("button[data-act]").forEach(b => b.onclick = async () => {
+  b.disabled = true;
+  try {
+    await post("/api/control", { action: b.dataset.act, value: parseFloat(b.dataset.v || 0), device: $("device").value });
+    if (b.dataset.act === "disconnect") say("Disconnected.");
+    poll();
+  }
+  catch (e) { say(e.message, "bad"); }
+  b.disabled = false;
+});
+
+const seek = $("seek");
+seek.addEventListener("input", () => { seeking = true; $("cur").textContent = fmt(seek.value); });
+seek.addEventListener("change", async () => {
+  try { await post("/api/control", { action: "seek_abs", value: +seek.value }); } catch (e) { say(e.message, "bad"); }
+  seeking = false;
+});
+
+async function poll() {
+  try {
+    const s = await api("/api/status");
+    $("applyBtn").classList.toggle("hidden", !s.url || s.url !== $("url").value.trim());
+    $("now").textContent = s.title ? `${s.device} · ${s.title}` : "Nothing playing";
+    $("state").textContent = s.state === "IDLE" ? "" : s.state.toLowerCase();
+    $("playBtn").textContent = s.state === "PLAYING" ? "⏸" : "▶";
+    if (!seeking) {
+      seek.max = Math.floor(s.duration || 0);
+      seek.value = Math.floor(s.time || 0);
+      $("cur").textContent = fmt(s.time);
+    }
+    $("dur").textContent = fmt(s.duration);
+    $("offset").textContent = s.subs ? `(${s.offset > 0 ? "+" : ""}${s.offset}s)` : "";
+    $("ccBtn").textContent = s.subs_on ? "CC on" : "CC off";
+  } catch {}
+}
+setInterval(poll, 1000);
+loadDevices(false);
+browse((() => { try { return localStorage.getItem("dir") || ""; } catch { return ""; } })());
+poll();
+</script>
+</body>
+</html>
