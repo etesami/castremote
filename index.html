@@ -63,6 +63,11 @@
       <button class="small" id="searchBtn">Search</button>
     </div>
 
+    <div id="audioBox" class="hidden">
+      <label for="audio" style="margin-top:10px">Audio</label>
+      <select id="audio"></select>
+    </div>
+
     <label for="sub">Subtitles</label>
     <div class="row">
       <select id="sub"><option value="none">None</option></select>
@@ -85,7 +90,7 @@
     </div>
 
     <button class="primary" id="castBtn" style="width:100%;margin-top:14px">▶ Cast</button>
-    <button id="applyBtn" class="hidden" style="width:100%;margin-top:8px">Change subtitles, keep position</button>
+    <button id="applyBtn" class="hidden" style="width:100%;margin-top:8px">Change audio and subtitles, keep position</button>
     <div class="msg" id="msg"></div>
   </section>
 
@@ -209,6 +214,7 @@ async function findSubs() {
   probe = null;
   $("sub").innerHTML = '<option value="none">None</option>';
   $("file").classList.add("hidden");
+  $("audioBox").classList.add("hidden");
   try { localStorage.setItem("url", url); } catch {}
   say("Inspecting video…");
   $("findBtn").disabled = true;
@@ -226,6 +232,16 @@ async function findSubs() {
       o.disabled = !s.text; sel.add(o);
     });
     sel.add(new Option("⬆ Upload from phone…", "upload"));
+    const aud = $("audio");
+    aud.innerHTML = "";
+    probe.audio.forEach(a => {
+      const ch = { 1: "mono", 2: "stereo", 6: "5.1", 8: "7.1" }[a.channels] || (a.channels ? a.channels + " ch" : "");
+      const label = [LANGS[a.lang] || a.lang, a.title, ch].filter(Boolean).join(" · ") || "Track " + a.index;
+      aud.add(new Option(`🔈 ${label} [${a.codec}]${a.direct ? " (default)" : ""}`, a.index));
+    });
+    const direct = probe.audio.find(a => a.direct) || probe.audio.find(a => a.default);
+    if (direct) aud.value = direct.index;
+    $("audioBox").classList.toggle("hidden", probe.audio.length < 2);
     const usable = [...sel.options].filter(o => o.value !== "none" && o.value !== "upload" && !o.disabled);
     const persian = usable.find(o => o.value.startsWith("embedded:") && LANG_CODE[probe.embedded[o.value.split(":")[1]].lang] === "fa");
     const first = usable.find(o => o.value.startsWith("sidecar:")) || persian || usable[0];
@@ -257,6 +273,7 @@ async function startCast(resume) {
   fd.append("device", $("device").value);
   fd.append("encoding", $("encoding").value);
   fd.append("lang", $("lang").value);
+  if (probe && probe.audio.length > 1) fd.append("audio", $("audio").value);
   const [kind, i] = $("sub").value.split(":");
   fd.append("sub_kind", kind);
   if (resume) fd.append("resume", "1");

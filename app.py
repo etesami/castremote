@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import socket
+import subprocess
 import threading
 import time
 import urllib.parse
@@ -51,7 +52,7 @@ lock = threading.RLock()
 casts = {}          # uuid -> Chromecast
 browser = None
 vtt_store = {}      # name -> vtt text
-session = {}        # current playback: cast, url, ctype, title, cues, offset, lang
+session = {}        # current playback: cast, url, ctype, title, cues, offset, lang, remux, start, stream_id
 
 
 # ---------------------------------------------------------------- devices
@@ -82,11 +83,29 @@ def list_devices():
     return devs
 
 
+def revive(cc):
+    """The connection thread gives up after a few failed reconnects (the TV slept, the network dropped, or a
+    new search closed the zeroconf it reconnects through), and a thread can't be started twice. So replace
+    a dead Chromecast with a new one for the same device, connected by address."""
+    sc = getattr(cc, "socket_client", None)
+    if sc is None or sc.ident is None or sc.is_alive():
+        return cc
+    info = cc.cast_info
+    new = pychromecast.get_chromecast_from_host(
+        (info.host, info.port, cc.uuid, info.model_name, info.friendly_name), tries=2)
+    with lock:
+        casts[str(cc.uuid)] = new
+        if session.get("cast") is cc:
+            session["cast"] = new
+    return new
+
+
 def get_cast(dev_id):
     with lock:
         cc = casts.get(dev_id) if dev_id else (session.get("cast") or next(iter(casts.values()), None))
     if cc is None:
         raise ValueError("No Chromecast found. Tap 'Search' (and check you're on the same network).")
+    cc = revive(cc)
     cc.wait(timeout=10)
     return cc
 
@@ -164,6 +183,54 @@ SUPPORTED_V = {"h264", "hevc", "vp8", "vp9", "av1"}
 SUPPORTED_A = {"aac", "mp3", "opus", "vorbis", "flac"}
 
 
+def audio_tracks(info):
+    """Audio streams from ffprobe output. "direct" marks the one the Chromecast plays by itself: the first
+    track, unless another one is flagged default and it isn't (then it's unclear, so none is direct)."""
+    streams = [st for st in info.get("streams", []) if st.get("codec_type") == "audio"]
+    tracks = []
+    for i, st in enumerate(streams):
+        tags, default = st.get("tags", {}), bool(st.get("disposition", {}).get("default"))
+        tracks.append({"index": st["index"], "codec": st.get("codec_name", "?"), "lang": tags.get("language", ""),
+                       "title": tags.get("title", ""), "channels": st.get("channels", 0), "default": default,
+                       "direct": i == 0 and (default or not any(s.get("disposition", {}).get("default") for s in streams))})
+    return tracks
+
+
+def remux_settings(src, index):
+    """How to stream src with audio track index, or None if the Chromecast plays that track as the file is."""
+    info = subs.probe(src)
+    track = next((t for t in audio_tracks(info) if t["index"] == index), None)
+    if track is None:
+        raise ValueError("That audio track isn't in the video.")
+    if track["direct"]:
+        return None
+    fmt = info.get("format", {})
+    return {"src": src, "index": index, "copy": track["codec"] in SUPPORTED_A,
+            "duration": float(fmt.get("duration") or 0), "start_time": float(fmt.get("start_time") or 0)}
+
+
+def keyframe_before(remux, t):
+    """Time of the last video keyframe at or before t. A stream copy can only start on a keyframe, so starting
+    exactly on one keeps the timeline (and the subtitles) in sync."""
+    if t <= 0:
+        return 0.0
+    st0 = remux["start_time"]
+    try:
+        out = subs.run(["ffprobe", "-v", "error", "-select_streams", "V:0", "-read_intervals",
+                        f"{st0 + max(0.0, t - 30)}%{st0 + t + 0.1}", "-show_entries", "packet=pts_time,flags",
+                        "-of", "csv=p=0", remux["src"]], timeout=30).decode()
+        keys = [float(line.split(",")[0]) - st0 for line in out.splitlines()
+                if ",K" in line and not line.startswith("N/A")]
+        return max([k for k in keys if k <= t + 0.001] or [t])
+    except Exception:
+        return t
+
+
+def position(cast):
+    """Where playback is in the video. A remuxed stream starts at session["start"], so add that."""
+    return session.get("start", 0.0) + (cast.media_controller.status.adjusted_current_time or 0)
+
+
 def err(msg, code=400):
     return jsonify({"error": str(msg)}), code
 
@@ -171,18 +238,25 @@ def err(msg, code=400):
 def publish_vtt(cast):
     """Render current cues (+offset) to a fresh VTT URL the Chromecast can fetch."""
     name = uuid.uuid4().hex[:12] + ".vtt"
-    vtt_store[name] = subs.to_vtt(session["cues"], session.get("offset", 0.0))
+    vtt_store[name] = subs.to_vtt(session["cues"], session.get("offset", 0.0) - session.get("start", 0.0))
     for old in list(vtt_store)[:-5]:
         vtt_store.pop(old, None)
     return f"http://{lan_ip_towards(cast.cast_info.host)}:{PORT}/subs/{name}"
 
 
 def load_media(cast, current_time=None):
+    """(Re)load the video at current_time, a position in the video (also when it's a remuxed stream)."""
     mc = cast.media_controller
+    url, remux = session["url"], session.get("remux")
+    session["start"] = 0.0
+    if remux:
+        # The stream can't seek, so it starts where we want to be.
+        session["start"] = keyframe_before(remux, current_time or 0)
+        url, current_time = f"{base_url()}/stream/{session['stream_id']}?start={session['start']:.3f}", None
     kw = {}
     if session.get("cues"):
         kw = dict(subtitles=publish_vtt(cast), subtitles_lang=session.get("lang", "fa"), subtitles_mime="text/vtt")
-    mc.play_media(session["url"], session["ctype"], title=session["title"], current_time=current_time, **kw)
+    mc.play_media(url, session["ctype"], title=session["title"], current_time=current_time, **kw)
     mc.block_until_active(timeout=15)
 
 
@@ -210,6 +284,39 @@ def serve_media(rel):
     resp = send_file(path, conditional=True)
     resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
+
+
+@app.route("/stream/<sid>", methods=["GET", "HEAD"])
+def serve_stream(sid):
+    """The playing video with the chosen audio track, remuxed live by ffmpeg (audio converted to AAC if the
+    Chromecast can't play it). ?start= is where the stream begins."""
+    remux = session.get("remux")
+    if not remux or sid != session.get("stream_id"):
+        return Response("not found", 404)
+    headers = {"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"}
+    if request.method == "HEAD":
+        return Response(content_type="video/x-matroska", headers=headers)
+    try:
+        start = max(0.0, float(request.args.get("start", 0)))
+    except ValueError:
+        return Response("bad start", 400)
+    audio = ["-c:a", "copy"] if remux["copy"] else ["-c:a", "aac", "-ac", "2", "-b:a", "192k"]
+    cmd = ["ffmpeg", "-v", "error", "-nostdin", "-ss", f"{start + 0.001:.3f}", "-i", remux["src"],
+           "-map", "0:V:0?", "-map", f"0:{remux['index']}", "-c:v", "copy", *audio, "-f", "matroska", "pipe:1"]
+
+    def generate():
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        try:
+            while True:
+                chunk = proc.stdout.read(64 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+        finally:  # also runs when the Chromecast drops the connection
+            proc.kill()
+            proc.wait()
+
+    return Response(generate(), content_type="video/x-matroska", headers=headers)
 
 
 @app.get("/api/browse")
@@ -249,7 +356,7 @@ def api_probe():
     url = (request.json or {}).get("url", "").strip()
     if not url.startswith(("http://", "https://")):
         return err("Paste an http(s) link to the video.")
-    result = {"embedded": [], "sidecars": [], "warnings": []}
+    result = {"embedded": [], "audio": [], "sidecars": [], "warnings": []}
     local = local_media_path(url)
     try:
         info = subs.probe(local or url)
@@ -265,6 +372,7 @@ def api_probe():
                 result["warnings"].append(f"Video codec '{codec}' may not play on Chromecast.")
             elif ct == "audio" and codec not in SUPPORTED_A:
                 result["warnings"].append(f"Audio codec '{codec}' may not play on Chromecast (no sound).")
+        result["audio"] = audio_tracks(info)
         result["duration"] = float(info.get("format", {}).get("duration") or 0)
     except Exception as e:
         result["warnings"].append(f"Could not inspect the video: {str(e)[-200:]}")
@@ -277,8 +385,8 @@ def api_probe():
 
 @app.post("/api/play")
 def api_play():
-    """Form fields: url, device, sub_kind (none|embedded|sidecar|upload), sub_ref, codec, encoding,
-    lang, file, resume (1 = swap subtitles on the video already playing, keeping the position)."""
+    """Form fields: url, device, audio (stream index), sub_kind (none|embedded|sidecar|upload), sub_ref, codec,
+    encoding, lang, file, resume (1 = swap audio and subtitles on the video already playing, keeping the position)."""
     f = request.form
     url = f.get("url", "").strip()
     if not url.startswith(("http://", "https://")):
@@ -286,6 +394,12 @@ def api_play():
     kind, ref, enc = f.get("sub_kind", "none"), f.get("sub_ref", ""), f.get("encoding", "auto")
     if kind == "sidecar" and not ref.startswith(("http://", "https://")):
         return err("The subtitle link must start with http:// or https://.")
+    remux = None
+    try:
+        if f.get("audio"):
+            remux = remux_settings(local_media_path(url) or url, int(f["audio"]))
+    except Exception as e:
+        return err(f"Audio problem: {e}")
     cues = []
     try:
         if kind == "embedded":
@@ -309,15 +423,17 @@ def api_play():
             if f.get("resume") == "1":
                 if session.get("url") != url:
                     return err("That isn't the video that's playing now.")
-                session.update(cues=cues, offset=0.0, lang=lang)
-                cast = session["cast"]
-                load_media(cast, current_time=cast.media_controller.status.adjusted_current_time)
+                pos = position(session["cast"])
+                cast = revive(session["cast"])
+                cast.wait(timeout=10)
+                session.update(cues=cues, offset=0.0, lang=lang, remux=remux)
+                load_media(cast, current_time=pos)
                 return jsonify({"ok": True, "subtitle_lines": len(cues)})
         cast = get_cast(f.get("device"))
         with lock:
             session.clear()
             session.update(cast=cast, url=url, ctype=content_type_for(url), cues=cues, offset=0.0,
-                           lang=lang,
+                           lang=lang, remux=remux, start=0.0, stream_id=uuid.uuid4().hex[:12],
                            title=urllib.parse.unquote(urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1]))
             load_media(cast)
     except Exception as e:
@@ -330,6 +446,12 @@ def api_control():
     d = request.json or {}
     action = d.get("action")
     cast = session.get("cast")
+    if cast:
+        try:
+            cast = revive(cast)
+            cast.wait(timeout=10)
+        except Exception as e:
+            return err(f"Can't reach the Chromecast: {e}", 500)
     if action == "disconnect":
         # Also works after an app restart, when there's no session but the TV is still casting.
         try:
@@ -345,10 +467,14 @@ def api_control():
     try:
         if action == "toggle":
             mc.pause() if mc.status.player_state == "PLAYING" else mc.play()
-        elif action == "seek_rel":
-            mc.seek(max(0, (mc.status.adjusted_current_time or 0) + float(d.get("value", 0))))
-        elif action == "seek_abs":
-            mc.seek(max(0, float(d.get("value", 0))))
+        elif action in ("seek_rel", "seek_abs"):
+            t = max(0.0, float(d.get("value", 0)) + (position(cast) if action == "seek_rel" else 0))
+            remux = session.get("remux")
+            if remux:
+                with lock:  # the stream can't seek, so restart it at the new position
+                    load_media(cast, current_time=min(t, max(0.0, remux["duration"] - 5)) if remux["duration"] else t)
+            else:
+                mc.seek(t)
         elif action == "stop":
             mc.stop()
         elif action == "volume":
@@ -363,7 +489,7 @@ def api_control():
                 return err("No subtitles loaded.")
             with lock:
                 session["offset"] = round(session.get("offset", 0.0) + float(d.get("value", 0)), 2)
-                load_media(cast, current_time=mc.status.adjusted_current_time)  # reload with shifted subs
+                load_media(cast, current_time=position(cast))  # reload with shifted subs
         else:
             return err("Unknown action.")
     except Exception as e:
@@ -379,10 +505,11 @@ def api_status():
     st = cast.media_controller.status
     return jsonify({
         "state": st.player_state, "title": session.get("title"), "url": session.get("url"),
-        "time": st.adjusted_current_time or 0, "duration": st.duration or 0,
+        "time": position(cast), "duration": (session.get("remux") or {}).get("duration") or st.duration or 0,
         "volume": cast.status.volume_level if cast.status else None,
         "subs": bool(session.get("cues")), "subs_on": bool(st.current_subtitle_tracks),
         "offset": session.get("offset", 0.0), "device": cast.name,
+        "audio": (session.get("remux") or {}).get("index"),
     })
 
 

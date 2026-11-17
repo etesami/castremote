@@ -16,6 +16,7 @@ castremote runs on a computer on your home network. Open its page on your phone,
 
 - **Pick a video** from a configured folder, or paste any `http(s)` video link
 - **Finds your Chromecasts** automatically
+- **Audio track choice** for videos with more than one, such as a dubbed and an original track
 - **Remote control:** play/pause, seek, skip, volume, stop and disconnect
 - **Subtitles** from three sources:
   - files next to the video (`.srt`, `.vtt`, `.ass`, `.ssa`)
@@ -75,6 +76,7 @@ Only run it on a network you trust, and never forward its port to the internet.
 | The Chromecast can't play a link | Use the computer's network address, not `localhost`. |
 | Video won't play or has no sound | The Chromecast may not support its format. The app warns you about this when it inspects the video. H.264 or HEVC video with AAC audio is the safest choice. |
 | Seeking doesn't work on a pasted link | The server hosting the video must support HTTP range requests. `python -m http.server` doesn't. Videos picked from `media_dir` support seeking. |
+| Seeking is slower with another audio track | Only the first audio track plays directly. Other tracks are streamed through FFmpeg, so each seek restarts the stream from the nearest keyframe. Tracks the Chromecast can't play, such as AC3 or DTS, are converted to stereo AAC. |
 | Subtitles are garbled | Choose a different encoding next to the subtitle list, then cast again. |
 | An embedded subtitle shows as unsupported | Image-based tracks (PGS, VobSub) can't be converted to text. |
 | Embedded subtitles from a link are slow | FFmpeg has to read the whole file over the network. A separate subtitle file loads much faster. |
